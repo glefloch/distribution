@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/registry/api/errcode"
@@ -51,6 +53,24 @@ func (th *tagsHandler) GetTags(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
+	// retrieve pagination parameters
+	if pagingEnabled(r.URL) {
+		p := pagingParameters(r.URL)
+
+		page := make([]string, p.n)
+		filled, err := pageFilter(tags, page, p.last)
+		if err == io.EOF {
+			p.last = page[len(page)-1]
+			urlStr, err := p.createLink(r.URL.String())
+			if err != nil {
+				th.Errors = append(th.Errors, errcode.ErrorCodeUnknown.WithDetail(err))
+				return
+			}
+			w.Header().Set("Link", urlStr)
+		}
+		tags = page[0:filled]
+	}
+
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(tagsAPIResponse{
 		Name: th.Repository.Named().Name(),
@@ -59,4 +79,28 @@ func (th *tagsHandler) GetTags(w http.ResponseWriter, r *http.Request) {
 		th.Errors = append(th.Errors, errcode.ErrorCodeUnknown.WithDetail(err))
 		return
 	}
+}
+
+// pageFilter fills 'page' with tags from the 'last' up to the size of 'page'
+// and return 'n' for the number of tags which were filled.
+//'last' contains an offset in the tags and 'err' will be set to io.EOF
+// if there are no more tags to obtain
+func pageFilter(tags, page []string, last string) (n int, err error) {
+	var foundTags []string
+	var lastPage bool
+	for _, tag := range tags {
+		if strings.Compare(tag, last) > 0 {
+			foundTags = append(foundTags, tag)
+			if len(foundTags) == len(page) {
+				lastPage = true
+				break
+			}
+		}
+	}
+
+	n = copy(page, foundTags)
+	if !lastPage {
+		return n, io.EOF
+	}
+	return n, nil
 }
